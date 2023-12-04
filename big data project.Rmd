@@ -1,0 +1,459 @@
+---
+title: "Big Data Project"
+output: html_document
+date: "2023-11-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Loading the dataset
+news <- read.csv("news.csv")
+```
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(patchwork)
+library(knitr)
+library(tidytext)
+library(tidyverse)
+library(stringr)
+library(mlbench)
+library(tidytext)
+library(dplyr)
+library(ggplot2)
+library(topicmodels)
+library(stringr)
+library(tm)
+library(e1071)
+library(caret)
+```
+# Idea behind this project
+
+- first do a topic model to see certain topics within real and fake news just to see which ones stand out more
+- already separated by real and fake
+- train a model to understand words that fit into a real news and fake ones
+- use it to classify other news with good accuracy to determine if it is fake or real
+- using it on unseen data (can be throguh cross validation or bringing in new dataset of other country?)
+- use logistic regression, cite studies showing it to have the highest accuracy compared to others
+
+# What is the psychological question we want to see?
+
+- why do ppl fall for fake news?
+- what are the psychological motives behind people sharing fake news
+
+# This section is on data cleaning and visualising the top bigrams in each label
+
+---------------------------------------------------------------------
+
+- DATA CLEANING PROCEDURES
+- CREATING A CORPUS
+- LEMMATISATION
+- CREATE A DOCUMENT TERM MATRIX AFTER CLEANING THE DATA
+- SPARSITY - REMOVING TERMS WITH SPARSITY THAT IS GREATER THAN THE THRESHOLD
+- MAKING SURE EACH TERM IS ASSOCIATED WITH EITHER FAKE OR REAL NEWS
+- 
+
+```{r}
+# Data cleaning procedures
+clean_data <- news %>%
+  mutate(
+    text = tolower(text), # To make all words lowercased
+    text = str_replace_all(text, "\\b\\w{1}\\b", ""), # To remove words with one letter
+    text = str_replace_all(text, "\\b\\w*\\d\\w*\\b", ""), # To remove words contianing numbers
+    text = str_replace_all(text, "http\\S+", ""), # Remove website link
+    text = str_replace_all(text, "www\\.", ""), # Remove www
+    text = str_replace_all(text, "\\butm_\\w+\\b", ""), # Remove words containing utm_
+    text = str_replace_all(text, "[^a-zA-Z\\s]", ""), # Remove special characters and punctuations
+    text = str_replace_all(text, "\\s+", " "), # Same amount of space between all words
+    text = str_replace_all(text, "\\b\\d+\\b", ""), # Remove any numeric value
+  )
+
+clean_data$text <- gsub("http.*","", clean_data$text)
+clean_data$text <- gsub("https.*","", clean_data$text)
+clean_data$text <- gsub("utm_","", clean_data$text)
+clean_data$text <- removeNumbers(clean_data$text)
+```
+
+```{r}
+# Rename fake to 0 and real to 1
+clean_data <- clean_data %>%
+  mutate(label = ifelse(label == "REAL", 1, ifelse(label == "FAKE", 0, label)))
+
+# make label a factor
+clean_data$label <- as.factor(clean_data$label)
+```
+
+```{r}
+summary(news)
+```
+```{r}
+clean_data %>%
+  group_by(label) %>%
+  count() %>%
+  arrange(desc(n))
+```
+
+Fairly equal proportions of real and fake news in the dataset
+
+
+```{r}
+# Create a corpus of the title and text
+text_corpus <- Corpus(VectorSource(clean_data$text))
+```
+
+```{r warning=FALSE}
+# Do data cleaning by removing punctuations, stopwords, special characters and website links
+stop_words <- get_stopwords()
+text_corpus <- tm_map(text_corpus, removeWords, stop_words$word)
+text_corpus <- tm_map(text_corpus, stripWhitespace)
+
+# Define a custom function to remove specific punctuation marks as some are still present
+remove_specific_punctuation <- function(x) {
+  # Remove specified punctuation marks
+  x <- gsub("\\.", "", x)
+  x <- gsub(",", "", x)
+  x <- gsub("'", "", x)
+  x <- gsub("\"", "", x)
+  return(x)
+}
+
+# Apply the custom function to the text corpus
+text_corpus <- tm_map(text_corpus,
+                    content_transformer(remove_specific_punctuation))
+```
+
+```{r, warning=FALSE, message=FALSE}
+# This process will be stemming words in both corpus
+library(textstem)
+text_corpus <- tm_map(text_corpus, content_transformer(lemmatize_strings))
+```
+
+```{r}
+# Create a document term matrix
+dtm_text <- DocumentTermMatrix(text_corpus)
+inspect(dtm_text)
+```
+
+```{r}
+# Remove terms with sparsity greater than certain threshold
+dtm_text_clean <- removeSparseTerms(dtm_text, sparse = 0.99)
+inspect(dtm_text_clean)
+```
+
+```{r}
+# TF-IDF for model building
+dtm_idf <- weightTfIdf(dtm_text_clean)
+
+# Create a tidy table for semantic
+df_tidy_text <- tidy(dtm_text_clean)
+
+# Taking words of highest frequency by each document for text
+df_word_text <- df_tidy_text %>%
+  select(-document) %>%
+  group_by(term) %>%
+  summarise(freq = sum(count)) %>%
+  arrange(desc(freq))
+```
+
+```{r}
+# Convert dtm with idf into a matrix
+dtm_matrix <- as.matrix(dtm_idf)
+dtm_matrix <- cbind(dtm_matrix, labelnews = clean_data$label)
+```
+
+```{r}
+# convert matrix into dataframe
+dtm_df <- as.data.frame(dtm_matrix)
+dtm_df$labelnews <- as.factor(dtm_df$labelnews)
+```
+
+
+```{r}
+# See proportion of real to fake
+table(dtm_df$labelnews)
+```
+Still fairly equal proportion
+
+```{r}
+# Recode from 1 and 2 to 0 and 1
+dtm_df$labelnews <- as.factor(dtm_df$labelnews)
+levels(dtm_df$labelnews) <- c(0,1)
+```
+
+
+
+
+
+
+
+
+
+
+
+--------------------------------------------------------------
+# Research Question 1:
+## Looking at unique topics in real and fake news
+
+
+```{r}
+# Use cast_dtm for document term matrix for the topic model
+dtm_lda <- df_tidy_text %>%
+  cast_dtm(document, term, count)
+```
+
+```{r}
+# Create a two topic model to find unique topics
+news_lda <- LDA(dtm_lda, k = 2, control = list(seed = 100))
+news_lda
+```
+
+```{r}
+# Extracting the per-topic-per-word probability
+news_topics <- tidy(news_lda, matrix = "beta")
+news_topics
+```
+
+```{r}
+# Visualising the top words in each topic
+news_terms <- news_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 10) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+news_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+```
+
+Mostly similar like trump and clinton. Topic 2 has more terms relating to politics like president, republican and obama 
+
+```{r}
+library(tidyr)
+
+beta_wide <- news_topics %>%
+  mutate(topic = paste0("topic", topic)) %>%
+  pivot_wider(names_from = topic, values_from = beta) %>%
+  filter(topic1 > .004 | topic2 > .004) %>%
+  mutate(log_ratio = log2(topic2 / topic1))
+
+beta_wide
+```
+
+```{r}
+beta_wide %>%
+  mutate(term = reorder(term, log_ratio)) %>%
+  ggplot(aes(x = term, y = log_ratio)) +
+  scale_y_continuous(limits = c(-10,10)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  theme_bw(10)
+```
+
+Topic 2 words: president, obama, republican, state, trump, clinton
+
+
+Topic 1 words: good, vote, party, candidate, hillary
+
+Both all relate to politics, but there are slight differences. Therefore this further motivates the research question of whether a classifier can be made to classify fake and real news.
+
+
+
+
+
+
+
+--------------------------------------------------------------
+
+
+
+# Research Question 2:
+## Examining the overall sentiment of fake and real ones.
+## Do fake news have higher overall negative sentiment? If so it does affect political discourse in some way as it could damage the reputation of political leaders when fake news have negative sentiment towards them
+
+- do based on title because people are more likely to read just the headlines
+- maybe we can do moral instead?
+- use moral foundations dictionary
+
+```{r}
+# create dataframe that has label for each word
+sentiment_df <- clean_data %>%
+  unnest_tokens(word, title)
+
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+library(tidytext)
+
+bing_sentiment <- get_sentiments("bing")
+
+bing_word_count <- sentiment_df %>%
+  inner_join(bing_sentiment) %>%
+  ungroup()
+```
+
+```{r}
+# Visualise the top word in each label
+
+bing_word_count %>%
+  group_by(sentiment) %>%
+  count(word, sort = TRUE) %>%
+  slice_max(n, n=10) %>%
+  ungroup() %>%
+  mutate(word = reorder(word,n)) %>%
+  ggplot(aes(n,word, fill=sentiment)) +
+  geom_col(show.legend=FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(x = "Contribution of word to sentiment",
+       y = NULL)
+  
+```
+
+Trump is considered a positive sentiment. it is mistaken to be a noun that means to surpass or do something better. Therefore the word should be removed
+
+```{r}
+# Remove term trump as it is confused with the person and the noun
+bing_word_count_filtered <- bing_word_count %>%
+  filter(!grepl("trump", word, ignore.case = TRUE))
+
+# Grouping word by label and calculating overall sentiment of each label
+label_sentiment <- bing_word_count_filtered %>%
+  group_by(label, word) %>%
+  summarise(word_count = n(),
+            overall_sentiment = sum(sentiment == "positive")-sum(sentiment == "negative"))
+
+# Calculate total sentiment in each label
+
+label_sum_sentiment <- label_sentiment %>%
+  group_by(label) %>%
+  summarise(total_sentiment = sum(overall_sentiment))
+
+library(kableExtra)
+table_overall_sentiment <- label_sum_sentiment %>%
+  kable("html") %>%
+  kable_styling() %>%
+  add_header_above(c(" ", "Overall Sentiment"))
+table_overall_sentiment
+```
+
+Both fake and real news overall have negative sentiment after using the bing dictionary. The trump term is removed as the dictionary uses trump as if it is a noun. Overall, we can see that after removing the trump term, the fake news has twice the negativity as compared to real news.
+
+
+
+
+
+
+--------------------------------------------------------------
+
+
+
+
+# Research Question 3:
+## Building on RQ1 where we create a model able to classify fake news from real ones
+## Compare 2 different models : Random Forest and Naive Bayes
+
+
+
+```{r}
+# Split the data into training and testing sets
+set.seed(111)
+index <- sample(nrow(dtm_df), nrow(dtm_df)*0.75, replace = FALSE)
+
+train_news <- dtm_df[index,]
+test_news <- dtm_df[-index,]
+
+names(train_news) <- make.names(names(train_news))
+names(test_news) <- make.names(names(test_news))
+
+table(train_news$labelnews)
+table(test_news$labelnews)
+```
+
+```{r}
+# Relevel train_news$labelnews so that 0 is reference
+train_news$labelnews <- relevel(train_news$labelnews, ref = "0")
+```
+
+```{r}
+# We will use a Naive Bayes model
+library(naivebayes)
+mdl_nb <- naive_bayes(labelnews ~ ., data = train_news)
+
+summary(mdl_nb)
+```
+
+```{r, warning=FALSE, message=FALSE}
+# Random forest model
+library(randomForest)
+k <- round(sqrt(ncol(train_news)-1))
+mdl_rf <- randomForest(formula = labelnews ~ .,
+                       data = train_news,
+                       ntree = 100,
+                       mtry = k,
+                       method = 'class')
+mdl_rf
+```
+
+```{r, warning=FALSE}
+# Testing out for svm
+svm_mod <- svm(labelnews ~ ., data = train_news)
+```
+
+
+```{r, warning=FALSE}
+# Testing it on the test set
+nb_predictions <- predict(mdl_nb, newdata = test_news)
+rf_predictions <- predict(mdl_rf, newdata = test_news, type = 'response')
+svm_predictions <- predict(svm_mod, newdata = test_news)
+```
+
+```{r}
+# Create confusion matrix for naive bayes predictions
+cf_nb <- confusionMatrix(nb_predictions, test_news$labelnews)
+cf_nb
+```
+
+```{r}
+# Confusion matrix for svm model
+cf_svm <- confusionMatrix(svm_predictions, test_news$labelnews)
+cf_svm
+```
+
+Identified words as fake when it should be real is more than identified it as real but is fake.
+
+```{r}
+# Confusion matrix for random forest
+cf_rf <- confusionMatrix(rf_predictions, test_news$labelnews)
+cf_rf
+```
+
+79% accuracy for naive bayes, 88% accuracy for support vector machine and random forest. can talk about what else should be done to achieve higher accuracy
+
+other people have gotten higher accuracy
+
+
+
+```{r}
+# Table for confusion matrix
+```
+
+
+LIMITATION:
+
+Error of misclassifying real news for fake news is larger than vice versa. Discuss implications of the model
+
+---------------------------------------------------------
+
+
+
+
+
+
+
+
